@@ -29,30 +29,30 @@ class cacheSet
     public:
         // variables
         unsigned setID;
-        unsigned WaysNum;
         vector<setElem> tags; // if accessed get to top
 
 
         //Functions
         cacheSet(unsigned size, unsigned id){
             setID = id;
-            WaysNum = size;
             tags.erase(tags.begin(),tags.end());
             tags.resize(size);
         }
 
-        vector<setElem>::iterator findElembyTag(int tag)
+        vector<setElem>::iterator findElembyTag(unsigned tag)
         {
             vector<setElem>::iterator it;
             for(it = tags.begin(); it != tags.end(); it++ )    {
                 setElem curr = (*it);
+                //cout << "findElembyTAG CMP: " << curr.tag << " == " << tag <<endl;
                 if(curr.tag == tag)
                     return it;
             }
-            return it; //returns tags.end() - tag doesnot exist
+            //cout<< "not found...."<<endl;//DEBUG
+            return it; //returns tags.end() - tag doesnt exist
         }
 
-        bool RemoveElembyTag(int tag)// return true if removed
+        bool RemoveElembyTag(unsigned tag)// return true if removed
         {
             vector<setElem>::iterator it;
             for(it = tags.begin(); it != tags.end(); it++ )    {
@@ -66,9 +66,9 @@ class cacheSet
             return false; //returns tags.end() - tag doesnot exist
         }
 
-        setElem insertNewElem(unsigned newAddr, unsigned newTag, bool* isRemoved)
+        setElem insertNewElem(unsigned newAddr, unsigned newTag, bool* isRemoved, bool isWrite)
         {
-            setElem newElem = {newAddr, newTag, false, true}, removedElem = {newAddr, newTag, false , true};
+            setElem newElem = {newAddr, newTag, isWrite, true}, removedElem = {newAddr, newTag, false , true};
             *isRemoved =false;
             bool valid = (*tags.begin()).valid; //if first is invalid -> cache is not full
             if (valid)
@@ -88,21 +88,22 @@ class cacheSet
 
         void updateRecentlyUsed(vector<setElem>::iterator elem, bool isWriteCMD) {
             setElem UpdatedElem = (*elem);
+            cout << (*elem).addr <<endl;
             tags.erase(elem);
+            UpdatedElem.valid=true;
             if (isWriteCMD)
-            {
-                UpdatedElem.dirty=isWriteCMD;
-            }
+                UpdatedElem.dirty=true;
+
             tags.push_back(UpdatedElem); //Last in vector is LRU
         }
 
-        void print()
+        void print() //used for debugging
         {
             cout << "SetID: " << setID <<endl;
             vector<setElem>::iterator it;
             for(it = tags.begin(); it != tags.end(); it++ )    {
                 setElem curr = (*it);
-                cout << curr.tag << " D: " << curr.dirty << " V: " << curr.valid <<endl;
+                cout <<"fullAddr: " <<curr.addr <<" tag: " <<curr.tag << " D: " << curr.dirty << " V: " << curr.valid <<endl;
             }
         }
 
@@ -156,23 +157,29 @@ void printCaches()
 };
 
 
+void insertToL1_ElemThatExistsInL2(setElem oldElem, unsigned setL1, unsigned addr, unsigned tagL1, unsigned tagL2, unsigned setL2, bool* isRemoved, bool isWrite)
+{
+    oldElem = L1[setL1]->insertNewElem(addr, tagL1, isRemoved, isWrite);
+    // if dirty than update L2
 
+    if (oldElem.dirty && (*isRemoved)) // if L1 entry removed -> update dirty bit on L2
+    {
 
+        unsigned oldL2tag = (oldElem.addr >> BSize) >> L2Assoc;
+        vector<setElem>::iterator it = L2[setL2]->findElembyTag(oldL2tag);
+        (*it).dirty=oldElem.dirty; //update dirty bit of L2 from L1
+        L2[setL2]->updateRecentlyUsed(it, isWrite); // https://moodle.technion.ac.il/mod/forum/discuss.php?d=422420
+    }
+}
 
+// most Important function in this HW
 void CacheLogic(char operation, unsigned addr)
 {
-    //extract set from addr
-
-    unsigned tagL1 = (addr >> BSize) >> L1Assoc;
-    cout << "tagL1: " << tagL1 ;
-    unsigned tagL2 = (addr >> BSize) >> L2Assoc; //remove offset than remove tag
-    cout << " tagL2: " << tagL2 <<endl;
-    unsigned setL1 = (addr >> BSize)-(tagL1<<L1Assoc);
-    cout << " setL1: " << setL1 <<endl;
-    unsigned setL2 = (addr >> BSize)-(tagL2<<L2Assoc);
-    cout << " setL2: " << setL2 <<endl << endl;
-    //extract tag from addr
-
+    //extract set and tag from recieved addr
+    unsigned tagL1 = (addr >> BSize) >> L1Assoc;            cout << "tagL1: " << tagL1 ; //DEBUG
+    unsigned tagL2 = (addr >> BSize) >> L2Assoc;           cout << " tagL2: " << tagL2 ; //DEBUG
+    unsigned setL1 = (addr >> BSize)-(tagL1<<L1Assoc);    cout << " setL1: " << setL1 ; //DEBUG
+    unsigned setL2 = (addr >> BSize)-(tagL2<<L2Assoc);    cout << " setL2: " << setL2 <<endl << endl; //DEBUG
 
     vector<setElem>::iterator iterL1 = L1[setL1]->findElembyTag(tagL1);
     vector<setElem>::iterator iterL2 = L2[setL2]->findElembyTag(tagL2);
@@ -180,10 +187,40 @@ void CacheLogic(char operation, unsigned addr)
     bool* isRemoved;
     isRemoved = new bool;
 
-    L1AccessCounter++; //in each cmd we are Accessing L1
+    L1AccessCounter++; // Always Accessing L1 Cache..
+
     if (operation =='w')
     {
+        if (iterL2 != L2[setL2]->tags.end()) // tag already exists in L2
+        {
 
+            if (iterL1 != L1[setL1]->tags.end()) // tag data exists in L1
+            { // data exists on L1 and L2
+                L1[setL1]->updateRecentlyUsed(iterL1, true); //update the LRU only of L1, see https://moodle.technion.ac.il/mod/forum/discuss.php?d=422323
+                totalCycles += L1Cyc;
+            }
+            else { // data exists only on L2
+                L2[setL2]->updateRecentlyUsed(iterL2, true);
+                if (WrAlloc)
+                {//Write Alloc ->As in tutorial bring to L1
+                    insertToL1_ElemThatExistsInL2(oldElem, setL1, addr, tagL1, tagL2, setL2, isRemoved, true); // insert the data to L1
+                }
+
+                L2AccessCounter++;  L1missCounter++;   totalCycles += L1Cyc+L2Cyc;
+            }
+        } else {//Data is only in MEM - insert data addr to L1, L2
+
+            // Insert new Elem to L2 - snoop datafrom L1 if needed:
+            if (WrAlloc) {
+                oldElem = L2[setL2]->insertNewElem(addr, tagL2, isRemoved, true);
+                unsigned oldElemL1Tag = (oldElem.addr >> BSize) >> L1Assoc;
+                if (*isRemoved) //check out if L2 was full ->  snoop the removed L2 elem from L1
+                    L1[setL1]->RemoveElembyTag(oldElemL1Tag); //snoop the element removed from L2
+
+                insertToL1_ElemThatExistsInL2(oldElem, setL1, addr, tagL1, tagL2, setL2, isRemoved, true);
+            }
+            L2AccessCounter++;  L1missCounter++;  L2missCounter++;  totalCycles += L1Cyc+L2Cyc+MemCyc;
+        }
 
     }
     else if (operation =='r')
@@ -192,60 +229,25 @@ void CacheLogic(char operation, unsigned addr)
         {
             if (iterL1 != L1[setL1]->tags.end()) // tag data exists in L1
             { // data exists on L1 and L2
-                //update the LRU only of L1, cause L1 hit
-                L1[setL1]->updateRecentlyUsed(iterL1, false);
+                L1[setL1]->updateRecentlyUsed(iterL1, false); //update the LRU only of L1, cause L1 hit
                 totalCycles += L1Cyc;
-
             }
-            else
-            { // data exists only on L2
-
+            else //L1 MISS , L2 HIT
+            {
                 L2[setL2]->updateRecentlyUsed(iterL2, false); //update tag's L2 LRU as
-
-                // insert the data to L1
-                oldElem = L1[setL1]->insertNewElem(addr, tagL1, isRemoved);
-                // if dirty than update L2
-                if (oldElem.dirty && (*isRemoved)) // if L1 entry removed -> update dirty bit on L2
-                {
-                    unsigned oldL2tag = (oldElem.addr >> BSize)-(tagL2<<L2Assoc);
-                    vector<setElem>::iterator it = L2[setL2]->findElembyTag(oldL2tag);
-                    (*it).dirty=oldElem.dirty; //update dirty bit of L2 from L1
-                    L2[setL2]->updateRecentlyUsed(it, false);
-                }
-
-                L2AccessCounter++;
-                L1missCounter++;
-                totalCycles += L1Cyc+L2Cyc;
+                insertToL1_ElemThatExistsInL2(oldElem, setL1, addr, tagL1, tagL2, setL2, isRemoved, false); // insert the data to L1
+                L2AccessCounter++;  L1missCounter++;   totalCycles += L1Cyc+L2Cyc;
             }
-        } else {
-            //Data is only in MEM
-            // insert data addr to L1, L2
-
-            // Insert to L2 - snoop data if needed:
-            oldElem = L2[setL2]->insertNewElem(addr, tagL2, isRemoved);
+        } else {//Data is only in MEM - insert data addr to L1, L2
+            // Insert new Elem to L2 because of read cmd - snoop datafrom L1 if needed:
+            oldElem = L2[setL2]->insertNewElem(addr, tagL2, isRemoved, false);
             unsigned oldElemL1Tag = (oldElem.addr >> BSize) >> L1Assoc;
+
             if (*isRemoved) //check out if L2 was full ->  snoop the removed L2 elem from L1
-            {
                 L1[setL1]->RemoveElembyTag(oldElemL1Tag); //snoop the element removed from L2
-            }
 
-            //Double code
-            oldElem = L1[setL1]->insertNewElem(addr, tagL1, isRemoved);
-            // if dirty than update L2
-            if (oldElem.dirty && (*isRemoved)) // if L1 entry removed -> update dirty bit on L2
-            {
-                unsigned oldL2tag = (oldElem.addr >> BSize)-(tagL2<<L2Assoc);
-                vector<setElem>::iterator it = L2[setL2]->findElembyTag(oldL2tag);
-                (*it).dirty=oldElem.dirty; //update dirty bit of L2 from L1
-                L2[setL2]->updateRecentlyUsed(it, false);
-            }
-
-            // L1 and L2 miss rate
-            L2AccessCounter++;
-            L1missCounter++;
-            L2missCounter++;
-
-            totalCycles += L1Cyc+L2Cyc+MemCyc;
+            insertToL1_ElemThatExistsInL2(oldElem, setL1, addr, tagL1, tagL2, setL2, isRemoved, false);
+            L2AccessCounter++;  L1missCounter++;  L2missCounter++;  totalCycles += L1Cyc+L2Cyc+MemCyc;
         }
     }
 
@@ -303,9 +305,9 @@ int main(int argc, char **argv) {
 
 	// Variables that will be easier to use:
     L1SetSize = 1<<L1Assoc;
-    cout << "L1SetSize: " << L1SetSize << endl; //DEBUG
+    cout << "L1WayNum: " << L1SetSize << endl; //DEBUG
     L2SetSize = 1<<L2Assoc;
-    cout << "L2SetSize: " <<  L2SetSize << endl; //DEBUG
+    cout << "L2WayNum: " <<  L2SetSize << endl; //DEBUG
     L1TotalEntriesNum = 1<<(L1Size-BSize); //Asuuming Bsize <= CacheSize
     cout << "L1TotalEntriesNum: "<< L1TotalEntriesNum << endl; //DEBUG
     L2TotalEntriesNum = 1<<(L2Size-BSize);
